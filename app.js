@@ -6,13 +6,11 @@ const {
   AudioPlayerStatus,
   getVoiceConnection,
 } = require('@discordjs/voice');
-
 const play = require('play-dl');
-
 require('dotenv').config();
-const TOKEN = process.env.DISCORD_TOKEN; // Loaded from .env file
+const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = '!';
-const TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const TIMEOUT = 5 * 60 * 1000;
 
 const client = new Client({
   intents: [
@@ -24,7 +22,6 @@ const client = new Client({
 });
 
 const queues = new Map();
-// Track temp files currently in use
 const activeTempFiles = new Set();
 
 client.once('ready', () => {
@@ -40,22 +37,38 @@ client.on('messageCreate', async (message) => {
   const guildId = message.guild.id;
 
   if (cmd === 'play') {
-    const url = args[0];
-    if (!url || !play.yt_validate(url)) {
-      return message.reply('❌ Please provide a valid YouTube URL.');
+    let inputUrl = args[0];
+    if (!inputUrl) return message.reply('❌ Please provide a YouTube URL.');
+
+    // Normalize the YouTube video URL
+    try {
+      const urlObj = new URL(inputUrl);
+      const videoId = urlObj.searchParams.get('v');
+      if (!videoId) {
+        return message.reply('❌ Could not extract video ID from the URL.');
+      }
+      inputUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    } catch (err) {
+      return message.reply('❌ Invalid URL format.');
     }
 
-    if (!voiceChannel) {
-      return message.reply('🔊 Join a voice channel first.');
+    const isValid = await play.yt_validate(inputUrl);
+    if (!isValid) return message.reply('❌ Not a valid YouTube video URL.');
+
+    if (!voiceChannel) return message.reply('🔊 Join a voice channel first.');
+
+    let queue = queues.get(guildId);
+    if (!queue || !Array.isArray(queue.songs)) {
+      queue = { songs: [], playing: false, timeout: null, tempFilePath: null };
     }
 
-    const queue = queues.get(guildId) || { songs: [], playing: false, timeout: null };
-    queue.songs.push({ url, requestedBy: message.author.username });
+    queue.songs.push({ url: inputUrl, requestedBy: message.author.username });
+    queue.playing = queue.playing || false;
     queues.set(guildId, queue);
 
-    message.channel.send(`🎶 Added to queue: ${url}`);
+    message.channel.send(`🎶 Added to queue: ${inputUrl}`);
 
-    if (!queue.playing) {
+    if (!queue.playing || !getVoiceConnection(guildId)) {
       playSong(message.guild, voiceChannel);
     }
   }
@@ -76,27 +89,19 @@ async function playSong(guild, voiceChannel) {
   }
 
   const song = queue.songs.shift();
-
-  if (!song || !song.url) {
-    console.warn('⚠️ Skipping invalid or undefined song URL.');
+  if (!song?.url) {
     playSong(guild, voiceChannel);
     return;
   }
 
-  // Log the URL and validation result
   const isValid = await play.yt_validate(song.url);
-  console.log(`Checking URL: ${song.url}, yt_validate: ${isValid}`);
   if (!isValid) {
-    console.warn('⚠️ Skipping song: yt_validate returned false.');
     playSong(guild, voiceChannel);
     return;
   }
 
   queue.playing = true;
   clearTimeout(queue.timeout);
-
-  console.log(`▶️ Now playing: ${song.url} (requested by ${song.requestedBy})`);
-
   const connection =
     getVoiceConnection(guildId) ||
     joinVoiceChannel({
@@ -106,43 +111,32 @@ async function playSong(guild, voiceChannel) {
     });
 
   try {
-    console.log(`Attempting to stream (yt-dlp fallback only): ${song.url}`);
     const ytdlp = require('yt-dlp-exec');
     const path = require('path');
     const fs = require('fs');
-    // Ensure temp directory exists in project root
     const tempDir = path.join(__dirname, 'temp');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
     const tempFilePath = path.join(tempDir, `discordbot_${guildId}_${Date.now()}.webm`);
-    console.log('Downloading opus audio to', tempFilePath);
     await ytdlp(song.url, {
       output: tempFilePath,
-      format: '251/bestaudio', // 251 is opus/webm
+      format: '251/bestaudio',
       noCheckCertificates: true,
       noWarnings: true,
       preferFreeFormats: true,
       addHeader: [
         'referer:youtube.com',
-        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-      ]
+        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      ],
     });
-    if (!fs.existsSync(tempFilePath)) {
-      throw new Error('yt-dlp did not create the temp file');
-    }
-    // Store temp file path in queue for cleanup
+    if (!fs.existsSync(tempFilePath)) throw new Error('yt-dlp did not create the temp file');
+
     queue.tempFilePath = tempFilePath;
     queues.set(guildId, queue);
-    // Mark file as in use
     activeTempFiles.add(tempFilePath);
-    const stream = {
-      stream: fs.createReadStream(tempFilePath),
-      type: 'webm/opus',
-    };
-    // If stream.stream is a URL or stream, createAudioResource can accept it directly
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
+
+    const resource = createAudioResource(fs.createReadStream(tempFilePath), {
+      inputType: 'webm/opus',
     });
 
     const player = createAudioPlayer();
@@ -150,10 +144,9 @@ async function playSong(guild, voiceChannel) {
     player.play(resource);
 
     player.on(AudioPlayerStatus.Idle, () => {
-      // Clean up temp file if used
       if (queue.tempFilePath && fs.existsSync(queue.tempFilePath)) {
         fs.unlink(queue.tempFilePath, (err) => {
-          if (err) console.error('Failed to delete temp file:', err);
+          if (err) console.error('Temp delete failed:', err);
         });
         activeTempFiles.delete(queue.tempFilePath);
         queue.tempFilePath = null;
@@ -164,45 +157,38 @@ async function playSong(guild, voiceChannel) {
 
     player.on('error', (err) => {
       console.error('Playback error:', err);
-      // Clean up temp file if used
       if (queue.tempFilePath && fs.existsSync(queue.tempFilePath)) {
         fs.unlink(queue.tempFilePath, (err) => {
-          if (err) console.error('Failed to delete temp file:', err);
+          if (err) console.error('Temp delete failed:', err);
         });
         activeTempFiles.delete(queue.tempFilePath);
         queue.tempFilePath = null;
         queues.set(guildId, queue);
       }
-      playSong(guild, voiceChannel); // Skip on error
+      playSong(guild, voiceChannel);
     });
 
   } catch (err) {
     console.error('Streaming error:', err);
-    // Optionally notify the user in the channel
-    try {
-      const textChannel = guild.channels.cache.find(
-        (ch) => ch.type === 0 && ch.permissionsFor(client.user).has('SendMessages')
-      );
-      if (textChannel) {
-        textChannel.send(`❌ Error streaming: ${song.url}\n${err.message}`);
-      }
-    } catch (notifyErr) {
-      console.error('Failed to notify channel of streaming error:', notifyErr);
+    const textChannel = guild.channels.cache.find(
+      (ch) => ch.type === 0 && ch.permissionsFor(client.user).has('SendMessages')
+    );
+    if (textChannel) {
+      textChannel.send(`❌ Error streaming: ${song.url}\n${err.message}`);
     }
-    playSong(guild, voiceChannel); // Skip to next
+    playSong(guild, voiceChannel);
   }
 }
 
 function stopPlayback(guild) {
   const guildId = guild.id;
   const queue = queues.get(guildId);
+  const fs = require('fs');
 
   if (queue) {
-    // Clean up temp file if used
-    const fs = require('fs');
     if (queue.tempFilePath && fs.existsSync(queue.tempFilePath)) {
       fs.unlink(queue.tempFilePath, (err) => {
-        if (err) console.error('Failed to delete temp file:', err);
+        if (err) console.error('Temp delete failed:', err);
       });
       activeTempFiles.delete(queue.tempFilePath);
       queue.tempFilePath = null;
@@ -214,9 +200,7 @@ function stopPlayback(guild) {
   }
 
   const connection = getVoiceConnection(guildId);
-  if (connection) {
-    connection.destroy();
-  }
+  if (connection) connection.destroy();
 
   queues.delete(guildId);
 }
@@ -226,53 +210,33 @@ function disconnectAfterTimeout(guildId) {
   if (!queue) return;
 
   queue.timeout = setTimeout(() => {
-    console.log(`💤 Inactive for 5 minutes, leaving guild ${guildId}`);
+    console.log(`💤 Inactive. Leaving guild ${guildId}`);
     stopPlayback({ id: guildId });
   }, TIMEOUT);
-
   queues.set(guildId, queue);
 }
 
-
-
-// Auto leave if bot is alone or bot is disconnected from a voice channel
 client.on('voiceStateUpdate', (oldState, newState) => {
   const botId = client.user.id;
   const oldChannel = oldState.channel;
   const newChannel = newState.channel;
 
-
-
-  // Only disconnect if the bot is the only member left in the old channel (no humans)
   if (oldChannel && oldChannel.members.has(botId)) {
-    // Exclude the bot itself from the count
     const humanCount = oldChannel.members.filter(m => !m.user.bot).size;
     const botCount = oldChannel.members.filter(m => m.user.bot).size;
-    console.log(`[DEBUG] voiceStateUpdate: oldChannel=${oldChannel.id}, humanCount=${humanCount}, botCount=${botCount}`);
-    // If only the bot is left (no humans), disconnect
     if (humanCount === 0 && botCount === 1) {
-      console.log('[DEBUG] Bot is the only member left, disconnecting...');
       stopPlayback(oldState.guild);
       return;
     }
   }
 
-  // Bot was disconnected from a voice channel (kicked or left by user action)
-  // Only run this if the state update is for the bot itself
   if (oldState.id === botId) {
-    if (
-      oldChannel &&
-      oldChannel.members.has(botId) &&
-      (!newChannel || !newChannel.members.has(botId))
-    ) {
-      console.log('[DEBUG] Bot itself was disconnected from the channel, cleaning up.');
+    if (oldChannel && oldChannel.members.has(botId) && (!newChannel || !newChannel.members.has(botId))) {
       stopPlayback(oldState.guild);
-      return;
     }
   }
 });
 
-// Clean up temp file if bot is disconnected or kicked from a guild
 client.on('guildDelete', (guild) => {
   const guildId = guild.id;
   const queue = queues.get(guildId);
@@ -280,8 +244,8 @@ client.on('guildDelete', (guild) => {
     const fs = require('fs');
     if (fs.existsSync(queue.tempFilePath)) {
       fs.unlink(queue.tempFilePath, (err) => {
-        if (err) console.error('Failed to delete temp file on guildDelete:', err);
-        else console.log(`Deleted temp file for guild ${guildId} on guildDelete.`);
+        if (err) console.error('Temp delete on guildDelete failed:', err);
+        else console.log(`Deleted temp file on guildDelete for ${guildId}`);
       });
       activeTempFiles.delete(queue.tempFilePath);
     }
@@ -290,17 +254,16 @@ client.on('guildDelete', (guild) => {
   }
 });
 
-// Periodically clean up unused temp files (every 10 minutes)
 setInterval(() => {
   const fs = require('fs');
   const path = require('path');
   const tempDir = path.join(__dirname, 'temp');
   if (!fs.existsSync(tempDir)) return;
+
   fs.readdir(tempDir, (err, files) => {
     if (err) return;
     files.forEach(file => {
       const filePath = path.join(tempDir, file);
-      // Only delete if not in use
       if (!activeTempFiles.has(filePath)) {
         fs.unlink(filePath, (err) => {
           if (!err) console.log('Deleted unused temp file:', filePath);
@@ -308,6 +271,6 @@ setInterval(() => {
       }
     });
   });
-}, 10 * 60 * 10000); // 10 minutes
+}, 10 * 60 * 1000);
 
 client.login(TOKEN);
