@@ -17,6 +17,7 @@
     "ffmpeg-static": "^5.2.0",
     "play-dl": "^1.9.7",
     "yt-dlp-exec": "^1.0.2",
-    "ytsr": "^3.8.4"
+    "ytsr": "^3.8.4",
+    "dotenv": "^16.4.5"
   }
 }
