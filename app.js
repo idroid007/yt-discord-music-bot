@@ -115,35 +115,41 @@ client.on('messageCreate', async (message) => {
 
   if (cmd === 'play') {
     let inputUrl = args[0];
-    if (!inputUrl) return message.reply('❌ **Please provide a YouTube URL.**\n💡 Visit **www.nohax.club** for more info!');
+    if (!inputUrl) return message.reply('❌ Please provide a YouTube URL.');
 
     // Normalize the YouTube video URL
     try {
       const urlObj = new URL(inputUrl);
       const videoId = urlObj.searchParams.get('v');
       if (!videoId) {
-        return message.reply('❌ **Could not extract video ID from the URL.**\n💡 Visit **www.nohax.club** for more info!');
+        return message.reply('❌ Could not extract video ID from the URL.');
       }
       inputUrl = `https://www.youtube.com/watch?v=${videoId}`;
     } catch (err) {
-      return message.reply('❌ **Invalid URL format.**\n💡 Visit **www.nohax.club** for more info!');
+      return message.reply('❌ Invalid URL format.');
     }
 
     const isValid = await play.yt_validate(inputUrl);
-    if (!isValid) return message.reply('❌ **Not a valid YouTube video URL.**\n💡 Visit **www.nohax.club** for more info!');
+    if (!isValid) return message.reply('❌ Not a valid YouTube video URL.');
 
-    if (!voiceChannel) return message.reply('🔊 **Join a voice channel first.**\n💡 Visit **www.nohax.club** for more info!');
+    if (!voiceChannel) return message.reply('🔊 Join a voice channel first.');
 
     let queue = queues.get(guildId);
     if (!queue || !Array.isArray(queue.songs)) {
       queue = { songs: [], playing: false, timeout: null, tempFilePath: null };
     }
 
+    // Clear any existing timeout when adding a new song
+    if (queue.timeout) {
+      clearTimeout(queue.timeout);
+      queue.timeout = null;
+    }
+
     queue.songs.push({ url: inputUrl, requestedBy: message.author.username });
     queue.playing = queue.playing || false;
     queues.set(guildId, queue);
 
-    message.channel.send(`🎶 **Added to queue:** ${inputUrl}\n💡 Visit **www.nohax.club** for more info!`);
+    message.channel.send(`🎶 Added to queue: ${inputUrl}`);
 
     // Pre-download the song if it's not the first in queue (will be played immediately) and not already cached
     if ((queue.songs.length > 1 || queue.playing) && !isSongCached(inputUrl)) {
@@ -156,16 +162,16 @@ client.on('messageCreate', async (message) => {
   }
 
   if (cmd === 'next' || cmd === 'skip') {
-    if (!voiceChannel) return message.reply('🔊 **Join a voice channel first.**\n💡 Visit **www.nohax.club** for more info!');
+    if (!voiceChannel) return message.reply('🔊 Join a voice channel first.');
     
     const queue = queues.get(guildId);
     if (!queue || !queue.playing) {
-      return message.reply('❌ **No song is currently playing.**\n💡 Visit **www.nohax.club** for more info!');
+      return message.reply('❌ No song is currently playing.');
     }
 
     // Check if there are any songs in the queue
     if (!queue.songs || queue.songs.length === 0) {
-      return message.reply('❌ **No next song is available in the queue.**\n💡 Visit **www.nohax.club** for more info!');
+      return message.reply('❌ No next song is available in the queue.');
     }
 
     // Clean up current temp file (but preserve cached songs)
@@ -194,12 +200,12 @@ client.on('messageCreate', async (message) => {
       connection.state.subscription.player.stop();
     }
     
-    message.channel.send('⏭️ **Skipped to next song!** 🎵\n💡 Visit **www.nohax.club** for more info!');
+    message.channel.send('⏭️ Skipped to next song.');
   }
 
   if (cmd === 'stop') {
     stopPlayback(message.guild);
-    message.channel.send('🛑 **Stopped playback and left the channel.** 👋\n💡 Visit **www.nohax.club** for more info!');
+    message.channel.send('🛑 Stopped playback and left the channel.');
   }
 });
 
@@ -226,6 +232,7 @@ async function playSong(guild, voiceChannel) {
 
   queue.playing = true;
   clearTimeout(queue.timeout);
+  queue.timeout = null;
   const connection =
     getVoiceConnection(guildId) ||
     joinVoiceChannel({
@@ -344,7 +351,7 @@ async function playSong(guild, voiceChannel) {
       (ch) => ch.type === 0 && ch.permissionsFor(client.user).has('SendMessages')
     );
     if (textChannel) {
-      textChannel.send(`❌ **Error streaming:** ${song.url}\n**Error:** ${err.message}\n💡 Visit **www.nohax.club** for more info!`);
+      textChannel.send(`❌ Error streaming: ${song.url}\n${err.message}`);
     }
     playSong(guild, voiceChannel);
   }
@@ -490,33 +497,6 @@ client.on('guildDelete', (guild) => {
   }
 });
 
-setInterval(() => {
-  const fs = require('fs');
-  const path = require('path');
-  const tempDir = path.join(__dirname, 'temp');
-  if (!fs.existsSync(tempDir)) return;
-
-  fs.readdir(tempDir, (err, files) => {
-    if (err) return;
-    files.forEach(file => {
-      const filePath = path.join(tempDir, file);
-      if (!activeTempFiles.has(filePath)) {
-        fs.unlink(filePath, (err) => {
-          if (!err) {
-            console.log('Deleted unused temp file:', filePath);
-            // Also remove from preDownloadedFiles if it exists there
-            for (const [url, path] of preDownloadedFiles.entries()) {
-              if (path === filePath) {
-                preDownloadedFiles.delete(url);
-                break;
-              }
-            }
-          }
-        });
-      }
-    });
-  });
-}, 10 * 60 * 1000);
 
 // Weekly cleanup - Delete everything in temp folder every 7 days
 setInterval(() => {
