@@ -41,7 +41,19 @@ function getCachedFilePath(url) {
   if (!videoId) return null;
   
   const path = require('path');
+  const fs = require('fs');
   const tempDir = path.join(__dirname, 'temp');
+  
+  // Look for any file with this video ID (regardless of extension)
+  if (fs.existsSync(tempDir)) {
+    const files = fs.readdirSync(tempDir);
+    const matchingFile = files.find(file => file.startsWith(videoId + '.'));
+    if (matchingFile) {
+      return path.join(tempDir, matchingFile);
+    }
+  }
+  
+  // Default to .webm if no existing file found
   return path.join(tempDir, `${videoId}.webm`);
 }
 
@@ -51,7 +63,60 @@ function isSongCached(url) {
   if (!cachedPath) return false;
   
   const fs = require('fs');
-  return fs.existsSync(cachedPath);
+  if (!fs.existsSync(cachedPath)) return false;
+  
+  // Check if file is not empty (corrupted files might be 0 bytes)
+  const stats = fs.statSync(cachedPath);
+  return stats.size > 1024; // File should be at least 1KB
+}
+
+// Helper function to validate audio file
+function isValidAudioFile(filePath) {
+  const fs = require('fs');
+  const path = require('path');
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    
+    const stats = fs.statSync(filePath);
+    if (stats.size <= 1024) return false; // File should be at least 1KB
+    
+    const ext = path.extname(filePath).toLowerCase();
+    const buffer = fs.readFileSync(filePath, { start: 0, end: 32 });
+    
+    switch (ext) {
+      case '.webm':
+        // Check for EBML header (0x1A45DFA3)
+        const ebmlHeader = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
+        for (let i = 0; i <= buffer.length - 4; i++) {
+          if (buffer.subarray(i, i + 4).equals(ebmlHeader)) {
+            return true;
+          }
+        }
+        return false;
+      
+      case '.m4a':
+        // Check for MP4/M4A header (ftyp)
+        const ftypHeader = Buffer.from('ftyp', 'ascii');
+        for (let i = 0; i <= buffer.length - 4; i++) {
+          if (buffer.subarray(i, i + 4).equals(ftypHeader)) {
+            return true;
+          }
+        }
+        return false;
+      
+      case '.opus':
+        // Check for Opus header
+        const opusHeader = Buffer.from('OpusHead', 'ascii');
+        return buffer.includes(opusHeader);
+      
+      default:
+        // For other formats, just check if file size is reasonable
+        return stats.size > 1024;
+    }
+  } catch (err) {
+    console.error('Error validating audio file:', err);
+    return false;
+  }
 }
 
 client.once('ready', () => {
@@ -78,12 +143,12 @@ async function preDownloadSong(url, guildId) {
     const tempDir = path.join(__dirname, 'temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-    const tempFilePath = path.join(tempDir, `${videoId}.webm`);
+    const tempFilePath = path.join(tempDir, `${videoId}.%(ext)s`);
     
     console.log(`🔄 Pre-downloading: ${url}`);
     await ytdlp(url, {
       output: tempFilePath,
-      format: '251/bestaudio',
+      format: 'bestaudio',
       noCheckCertificates: true,
       noWarnings: true,
       preferFreeFormats: true,
@@ -93,11 +158,15 @@ async function preDownloadSong(url, guildId) {
       ],
     });
 
-    if (fs.existsSync(tempFilePath)) {
-      preDownloadedFiles.set(url, tempFilePath);
-      activeTempFiles.add(tempFilePath);
+    // Find the actual downloaded file
+    const files = fs.readdirSync(tempDir);
+    const downloadedFile = files.find(file => file.startsWith(videoId + '.'));
+    if (downloadedFile) {
+      const actualFilePath = path.join(tempDir, downloadedFile);
+      preDownloadedFiles.set(url, actualFilePath);
+      activeTempFiles.add(actualFilePath);
       console.log(`✅ Pre-downloaded and cached: ${url}`);
-      return tempFilePath;
+      return actualFilePath;
     }
   } catch (err) {
     console.error(`❌ Pre-download failed for ${url}:`, err.message);
@@ -136,7 +205,10 @@ client.on('messageCreate', async (message) => {
 
     let queue = queues.get(guildId);
     if (!queue || !Array.isArray(queue.songs)) {
-      queue = { songs: [], playing: false, timeout: null, tempFilePath: null };
+      queue = { songs: [], playing: false, timeout: null, tempFilePath: null, voiceChannelId: voiceChannel.id };
+    } else {
+      // Update voice channel ID in case user moved to a different channel
+      queue.voiceChannelId = voiceChannel.id;
     }
 
     // Clear any existing timeout when adding a new song
@@ -168,6 +240,9 @@ client.on('messageCreate', async (message) => {
     if (!queue || !queue.playing) {
       return message.reply('❌ No song is currently playing.');
     }
+
+    // Update voice channel in queue
+    queue.voiceChannelId = voiceChannel.id;
 
     // Check if there are any songs in the queue
     if (!queue.songs || queue.songs.length === 0) {
@@ -230,16 +305,57 @@ async function playSong(guild, voiceChannel) {
     return;
   }
 
+  // If voiceChannel is not provided, try to get it from the stored channel ID
+  if (!voiceChannel && queue.voiceChannelId) {
+    voiceChannel = guild.channels.cache.get(queue.voiceChannelId);
+  }
+  
+  // If we still don't have a voice channel, try to find one with members
+  if (!voiceChannel) {
+    voiceChannel = guild.channels.cache.find(channel => 
+      channel.type === 2 && // Voice channel type
+      channel.members.some(member => !member.user.bot) // Has human members
+    );
+  }
+
   queue.playing = true;
   clearTimeout(queue.timeout);
   queue.timeout = null;
-  const connection =
-    getVoiceConnection(guildId) ||
-    joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    });
+  
+  // Ensure we have a valid voice channel
+  if (!voiceChannel || !voiceChannel.id) {
+    console.error('❌ No valid voice channel provided');
+    const textChannel = guild.channels.cache.find(
+      (ch) => ch.type === 0 && ch.permissionsFor(client.user).has('SendMessages')
+    );
+    if (textChannel) {
+      textChannel.send('❌ Cannot join voice channel. Please run the command while in a voice channel.');
+    }
+    return;
+  }
+  
+  let connection = getVoiceConnection(guildId);
+  
+  // If no connection exists or it's disconnected, create a new one
+  if (!connection || connection.state.status === 'disconnected' || connection.state.status === 'destroyed') {
+    try {
+      connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      });
+      console.log(`🔗 Joined voice channel: ${voiceChannel.name}`);
+    } catch (err) {
+      console.error('❌ Failed to join voice channel:', err);
+      const textChannel = guild.channels.cache.find(
+        (ch) => ch.type === 0 && ch.permissionsFor(client.user).has('SendMessages')
+      );
+      if (textChannel) {
+        textChannel.send('❌ Failed to join voice channel. Please try again.');
+      }
+      return;
+    }
+  }
 
   try {
     const ytdlp = require('yt-dlp-exec');
@@ -250,29 +366,48 @@ async function playSong(guild, voiceChannel) {
 
     let tempFilePath;
     
-    // First, check if song is already cached
+    // First, check if song is already cached and valid
     if (isSongCached(song.url)) {
-      tempFilePath = getCachedFilePath(song.url);
-      console.log(`🎵 Using cached file: ${song.url}`);
+      const cachedPath = getCachedFilePath(song.url);
+      if (isValidAudioFile(cachedPath)) {
+        tempFilePath = cachedPath;
+        console.log(`🎵 Using cached file: ${song.url}`);
+      } else {
+        console.log(`⚠️ Cached file is corrupted, re-downloading: ${song.url}`);
+        // Delete corrupted cached file
+        fs.unlinkSync(cachedPath);
+      }
     }
-    // Then check if we have a pre-downloaded file for this song
-    else if (preDownloadedFiles.has(song.url)) {
-      tempFilePath = preDownloadedFiles.get(song.url);
-      preDownloadedFiles.delete(song.url);
-      console.log(`🎵 Using pre-downloaded file: ${song.url}`);
-    } 
-    // Finally, download the song now with cached filename
-    else {
+    
+    // If we don't have a valid cached file, check pre-downloaded files
+    if (!tempFilePath && preDownloadedFiles.has(song.url)) {
+      const preDownloadPath = preDownloadedFiles.get(song.url);
+      if (isValidAudioFile(preDownloadPath)) {
+        tempFilePath = preDownloadPath;
+        preDownloadedFiles.delete(song.url);
+        console.log(`🎵 Using pre-downloaded file: ${song.url}`);
+      } else {
+        console.log(`⚠️ Pre-downloaded file is corrupted, re-downloading: ${song.url}`);
+        // Delete corrupted pre-downloaded file
+        if (fs.existsSync(preDownloadPath)) {
+          fs.unlinkSync(preDownloadPath);
+        }
+        preDownloadedFiles.delete(song.url);
+      }
+    }
+    
+    // Finally, download the song now with cached filename if we still don't have a valid file
+    if (!tempFilePath) {
       const videoId = getVideoId(song.url);
       if (!videoId) {
         throw new Error('Could not extract video ID from URL');
       }
       
-      tempFilePath = path.join(tempDir, `${videoId}.webm`);
+      tempFilePath = path.join(tempDir, `${videoId}.%(ext)s`);
       console.log(`🔄 Downloading and caching: ${song.url}`);
       await ytdlp(song.url, {
         output: tempFilePath,
-        format: '251/bestaudio',
+        format: 'bestaudio',
         noCheckCertificates: true,
         noWarnings: true,
         preferFreeFormats: true,
@@ -281,7 +416,16 @@ async function playSong(guild, voiceChannel) {
           'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         ],
       });
-      console.log(`✅ Downloaded and cached: ${song.url}`);
+      
+      // Find the actual downloaded file
+      const files = fs.readdirSync(tempDir);
+      const downloadedFile = files.find(file => file.startsWith(videoId + '.'));
+      if (downloadedFile) {
+        tempFilePath = path.join(tempDir, downloadedFile);
+        console.log(`✅ Downloaded and cached: ${song.url}`);
+      } else {
+        throw new Error('Downloaded file not found');
+      }
     }
     
     if (!fs.existsSync(tempFilePath)) throw new Error('Audio file not available');
@@ -298,9 +442,50 @@ async function playSong(guild, voiceChannel) {
       }
     }
 
-    const resource = createAudioResource(fs.createReadStream(tempFilePath), {
-      inputType: 'webm/opus',
-    });
+    // Create audio resource with better format handling
+    const ext = path.extname(tempFilePath).toLowerCase();
+    
+    let resource;
+    let inputType;
+    
+    try {
+      // Choose input type based on file extension
+      switch (ext) {
+        case '.webm':
+          inputType = 'webm/opus';
+          break;
+        case '.m4a':
+          inputType = 'mp4/aac';
+          break;
+        case '.opus':
+          inputType = 'ogg/opus';
+          break;
+        default:
+          inputType = undefined; // Let Discord.js auto-detect
+      }
+      
+      if (inputType) {
+        resource = createAudioResource(fs.createReadStream(tempFilePath), {
+          inputType: inputType,
+          inlineVolume: true
+        });
+      } else {
+        resource = createAudioResource(fs.createReadStream(tempFilePath), {
+          inlineVolume: true
+        });
+      }
+    } catch (err) {
+      console.log(`⚠️ ${inputType || 'Auto-detect'} failed, trying without input type...`);
+      try {
+        // Fallback to auto-detection
+        resource = createAudioResource(fs.createReadStream(tempFilePath), {
+          inlineVolume: true
+        });
+      } catch (err2) {
+        console.error('❌ Failed to create audio resource:', err2);
+        throw new Error('Cannot create audio resource from file');
+      }
+    }
 
     const player = createAudioPlayer();
     connection.subscribe(player);
@@ -322,7 +507,9 @@ async function playSong(guild, voiceChannel) {
         queue.tempFilePath = null;
         queues.set(guildId, queue);
       }
-      playSong(guild, voiceChannel);
+      // Get the voice channel dynamically for the next song
+      const currentVoiceChannel = queue.voiceChannelId ? guild.channels.cache.get(queue.voiceChannelId) : null;
+      playSong(guild, currentVoiceChannel);
     });
 
     player.on('error', (err) => {
@@ -342,7 +529,9 @@ async function playSong(guild, voiceChannel) {
         queue.tempFilePath = null;
         queues.set(guildId, queue);
       }
-      playSong(guild, voiceChannel);
+      // Get the voice channel dynamically for the next song
+      const currentVoiceChannel = queue.voiceChannelId ? guild.channels.cache.get(queue.voiceChannelId) : null;
+      playSong(guild, currentVoiceChannel);
     });
 
   } catch (err) {
@@ -353,7 +542,9 @@ async function playSong(guild, voiceChannel) {
     if (textChannel) {
       textChannel.send(`❌ Error streaming: ${song.url}\n${err.message}`);
     }
-    playSong(guild, voiceChannel);
+    // Get the voice channel dynamically for retry
+    const currentVoiceChannel = queue.voiceChannelId ? guild.channels.cache.get(queue.voiceChannelId) : null;
+    playSong(guild, currentVoiceChannel);
   }
 }
 

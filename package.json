@@ -4,7 +4,7 @@
   "description": "",
   "main": "app.js",
   "scripts": {
-    "start":"node app",
+    "start": "node app",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,12 +12,13 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.18.0",
     "discord.js": "^14.21.0",
+    "dotenv": "^16.4.5",
     "ffmpeg-static": "^5.2.0",
     "play-dl": "^1.9.7",
     "yt-dlp-exec": "^1.0.2",
-    "ytsr": "^3.8.4",
-    "dotenv": "^16.4.5"
+    "ytsr": "^3.8.4"
   }
 }
