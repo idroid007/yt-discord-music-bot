@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(yt-dlp --version)",
+      "Bash(python -m pip install -q -U yt-dlp)",
+      "Bash(npm install *)",
+      "Bash(node -e ' *)",
+      "Bash(CACHE_DIR=./temp node -e ' *)",
+      "Bash(node --check src/musicQueue.js)",
+      "Bash(npm view *)",
+      "Bash(node -e \"console.log\\('voice:', require\\('@discordjs/voice/package.json'\\).version\\); console.log\\('discord.js:', require\\('discord.js'\\).version\\)\")",
+      "Bash(node -e \"const { generateDependencyReport } = require\\('@discordjs/voice'\\); console.log\\(generateDependencyReport\\(\\)\\);\")",
+      "Bash(node -e \"try { require\\('@snazzah/davey'\\); console.log\\('davey: loaded'\\); } catch\\(e\\){ console.log\\('davey: NOT installed \\(fine for non-E2EE channels\\) -', e.code||e.message.split\\('\\\\n'\\)[0]\\); }\")",
+      "Bash(git ls-tree *)",
+      "Bash(git add *)"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+services:
+  music-bot:
+    build: .
+    container_name: yt-discord-music-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override defaults here if you like:
+      # CACHE_TTL_HOURS: "24"
+      # IDLE_TIMEOUT_MINUTES: "5"
+      # YT_DLP_COOKIES: /app/cookies.txt
+      YT_DLP_PATH: /usr/local/bin/yt-dlp
+      CACHE_DIR: /app/temp
+    volumes:
+      # Persist the audio cache across restarts.
+      - music-cache:/app/temp
+      # To use cookies, drop a Netscape cookies.txt next to this file and uncomment:
+      # - ./cookies.txt:/app/cookies.txt:ro
+
+volumes:
+  music-cache:
